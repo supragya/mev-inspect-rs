@@ -2,7 +2,8 @@ use mev_inspect::{
     inspectors::{Aave, Balancer, Compound, Curve, Uniswap, ZeroEx, ERC20},
     reducers::{ArbitrageReducer, LiquidationReducer, TradeReducer},
     types::Evaluation,
-    BatchInserts, BatchInspector, CachedProvider, HistoricalPrice, Inspector, MevDB, Reducer,
+    BatchInserts, BatchInspector, CachedBorProvider, CachedProvider, HistoricalPrice, Inspector,
+    MevDB, Reducer,
 };
 
 use ethers::{
@@ -14,6 +15,8 @@ use futures::SinkExt;
 use gumdrop::Options;
 use std::io::Write;
 use std::{collections::HashMap, convert::TryFrom, path::PathBuf, sync::Arc};
+#[macro_use]
+extern crate log;
 
 #[derive(Debug, Options, Clone)]
 struct Opts {
@@ -79,35 +82,47 @@ async fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
     let opts = Opts::parse_args_default_or_exit();
 
+    let bor_provider = CachedBorProvider::new(
+        Provider::try_from(opts.url.as_str())?,
+        opts.clone().cache.unwrap_or_else(|| PathBuf::from("cachedir")),
+    );
+    run(bor_provider, opts).await
+    // let bor_middleware = BorMiddleware::new(opts.url.as_str())?;
+    // run(bor_middleware, opts).await;
+
     // Instantiate the provider and read from the cached files if needed
-    if let Some(ref cache) = opts.cache {
-        let provider = CachedProvider::new(Provider::try_from(opts.url.as_str())?, cache);
-        run(provider, opts).await
-    } else {
-        let provider = Provider::try_from(opts.url.as_str())?;
-        run(provider, opts).await
-    }
+    // if let Some(ref cache) = opts.cache {
+    //     let provider = CachedProvider::new(Provider::try_from(opts.url.as_str())?, cache);
+    //     run(provider, opts).await
+    // } else {
+    //     error!("Provider trying");
+    // let provider = Provider::try_from(opts.url.as_str())?;
+    //     error!("Provider success");
+    //     run(provider, opts).await
+    // }
 }
 
 async fn run<M: Middleware + Clone + 'static>(provider: M, opts: Opts) -> anyhow::Result<()> {
     let provider = Arc::new(provider);
     // Instantiate the thing which will query historical prices
     let prices = HistoricalPrice::new(provider.clone());
+    error!("prices clone");
 
-    let compound = Compound::create(provider.clone()).await?;
-    let curve = Curve::create(provider.clone()).await?;
+    // let compound = Compound::create(provider.clone()).await?;
+    // let curve = Curve::create(provider.clone()).await?;
     let inspectors: Vec<Box<dyn Inspector + Send + Sync>> = vec![
         // Classify Transfers
-        Box::new(ZeroEx::new()),
-        Box::new(ERC20::new()),
+        // Box::new(ZeroEx::new()),
+        // Box::new(ERC20::new()),
         // Classify AMMs
-        Box::new(Balancer::new()),
+        // Box::new(Balancer::new()),
         Box::new(Uniswap::new()),
-        Box::new(curve),
+        // Box::new(curve),
         // Classify Liquidations
-        Box::new(Aave::new()),
-        Box::new(compound),
+        // Box::new(Aave::new()),
+        // Box::new(compound),
     ];
+    error!("inspector ready");
 
     let reducers: Vec<Box<dyn Reducer + Send + Sync>> = vec![
         Box::new(LiquidationReducer::new()),
@@ -115,6 +130,7 @@ async fn run<M: Middleware + Clone + 'static>(provider: M, opts: Opts) -> anyhow
         Box::new(ArbitrageReducer::new()),
     ];
     let processor = BatchInspector::new(inspectors, reducers);
+    error!("processor ready");
 
     // TODO: Pass overwrite parameter
     let mut db = MevDB::connect(opts.db_cfg, &opts.db_table).await?;
@@ -123,12 +139,14 @@ async fn run<M: Middleware + Clone + 'static>(provider: M, opts: Opts) -> anyhow
         db.clear().await?;
         db.create().await?;
     }
-    log::debug!("created mevdb table");
+    error!("created mevdb table");
 
     if let Some(cmd) = opts.cmd {
         match cmd {
             Command::Tx(opts) => {
+                error!("tx 001");
                 let traces = provider.trace_transaction(opts.tx).await?;
+                error!("traces found: {:?}", traces);
                 if let Some(inspection) = processor.inspect_one(traces) {
                     let gas_used = provider
                         .get_transaction_receipt(inspection.hash)
@@ -143,6 +161,7 @@ async fn run<M: Middleware + Clone + 'static>(provider: M, opts: Opts) -> anyhow
                         .expect("tx not found")
                         .gas_price;
 
+                    // error!("tx 001");
                     let evaluation =
                         Evaluation::new(inspection, &prices, gas_used, gas_price).await?;
                     println!("Found: {:?}", evaluation.as_ref().hash);
@@ -262,6 +281,8 @@ async fn run<M: Middleware + Clone + 'static>(provider: M, opts: Opts) -> anyhow
             .await?;
         }
     }
+
+    error!("all done");
 
     Ok(())
 }
